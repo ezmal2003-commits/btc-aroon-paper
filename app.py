@@ -358,12 +358,12 @@ def get_btc_data(days=365):
         resp.raise_for_status()
         data = resp.json()
 
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v','ct','qa','nt','tbv','tqv','ign'])
-        df = df[['ts','o','h','l','c','v']].copy()
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        for c in ['o','h','l','c','v']:
+        df = pd.DataFrame(data, columns=['timestamp','open','high','low','close','volume','close_time','quote_asset_volume','number_of_trades','taker_buy_base_volume','taker_buy_quote_volume','ignore'])
+        df = df[['timestamp','open','high','low','close','volume']].copy()
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        for c in ['open','high','low','close','volume']:
             df[c] = df[c].astype(float)
-        df.set_index('ts', inplace=True)
+        df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
         return df
     except:
@@ -377,10 +377,10 @@ def get_coingecko(days=365):
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        df['v'] = 0
-        df.set_index('ts', inplace=True)
+        df = pd.DataFrame(data, columns=['timestamp','open','high','low','close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['volume'] = 0
+        df.set_index('timestamp', inplace=True)
         df.sort_index(inplace=True)
         return df
     except:
