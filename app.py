@@ -40,13 +40,15 @@ if 'selected_period' not in st.session_state:
 
 
 def get_btc_data_binance(days: int = 365, interval: str = "1h") -> pd.DataFrame:
-    """Fetch BTC data from Binance API with retry."""
+    """Fetch BTC data from Binance API with CoinGecko fallback."""
     for attempt in range(3):
         try:
             start_time = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
             url = "https://api.binance.com/api/v3/klines"
             params = {"symbol": "BTCUSDT", "interval": interval, "startTime": start_time, "limit": 1000}
             response = requests.get(url, params=params, timeout=30)
+            if response.status_code == 451:
+                raise requests.HTTPError("Binance restricted in your region")
             response.raise_for_status()
             data = response.json()
             df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -59,11 +61,15 @@ def get_btc_data_binance(days: int = 365, interval: str = "1h") -> pd.DataFrame:
             df.set_index('timestamp', inplace=True)
             df.sort_index(inplace=True)
             return df
-        except Exception as e:
+        except requests.HTTPError as e:
+            if "451" not in str(e) or attempt == 2:
+                return get_btc_data_coingecko(days)
+        except Exception:
             if attempt == 2:
-                st.error(f"Failed to fetch data after 3 attempts: {e}")
-                return pd.DataFrame()
+                return get_btc_data_coingecko(days)
             time.sleep(2)
+
+    return get_btc_data_coingecko(days)
 
 
 def get_btc_data_coingecko(days: int = 365) -> pd.DataFrame:
