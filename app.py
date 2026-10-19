@@ -66,6 +66,23 @@ def get_btc_data_binance(days: int = 365, interval: str = "1h") -> pd.DataFrame:
             time.sleep(2)
 
 
+def get_btc_data_coingecko(days: int = 365) -> pd.DataFrame:
+    """Fetch BTC data from CoinGecko API as fallback."""
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days={days}"
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['volume'] = 0
+        df.set_index('timestamp', inplace=True)
+        df.sort_index(inplace=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
 def get_live_btc_price() -> dict:
     """Get live BTC price from Binance."""
     try:
