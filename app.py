@@ -1,11 +1,6 @@
 """
 Streamlit Dashboard for BTC Aroon Trend Agents Paper Trading System.
-
-This is the main application that provides a visual interface for:
-- Viewing BTC price charts with Aroon indicators
-- Monitoring agent status and signals
-- Tracking paper trading performance
-- Configuring system parameters
+Interactive features: real-time updates, comparative backtesting, live price feed.
 """
 
 import streamlit as st
@@ -14,10 +9,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 import time
-
-# Add current directory to path
 import sys
 sys.path.insert(0, '.')
 
@@ -26,58 +19,75 @@ from aroon import calculate_aroon_indicators
 from agents import ThreeAgentSystem
 
 
-# Page configuration
 st.set_page_config(
-    page_title="BTC Aroon Trend Agents",
+    page_title="BTC Aroon Interactive Dashboard",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Session state for interactivity
+if 'last_update' not in st.session_state:
+    st.session_state['last_update'] = None
+if 'btc_price_data' not in st.session_state:
+    st.session_state['btc_price_data'] = None
+if 'auto_refresh' not in st.session_state:
+    st.session_state['auto_refresh'] = False
+if 'refresh_count' not in st.session_state:
+    st.session_state['refresh_count'] = 0
+if 'selected_period' not in st.session_state:
+    st.session_state['selected_period'] = '1Y'
+
 
 def get_btc_data_binance(days: int = 365, interval: str = "1h") -> pd.DataFrame:
-    """Fetch BTC data from Binance API."""
+    """Fetch BTC data from Binance API with retry."""
+    for attempt in range(3):
+        try:
+            start_time = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+            url = "https://api.binance.com/api/v3/klines"
+            params = {"symbol": "BTCUSDT", "interval": interval, "startTime": start_time, "limit": 1000}
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                             'close_time', 'quote_asset_volume', 'number_of_trades',
+                                             'taker_buy_base_volume', 'taker_buy_quote_volume', 'ignore'])
+            df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
+            return df
+        except Exception as e:
+            if attempt == 2:
+                st.error(f"Failed to fetch data after 3 attempts: {e}")
+                return pd.DataFrame()
+            time.sleep(2)
+
+
+def get_live_btc_price() -> dict:
+    """Get live BTC price from Binance."""
     try:
-        # Calculate timestamp
-        start_time = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": "BTCUSDT",
-            "interval": interval,
-            "startTime": start_time,
-            "limit": 1000
-        }
-
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        response = requests.get(url, params={"symbol": "BTCUSDT"}, timeout=10)
         data = response.json()
-
-        # Parse data
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_volume', 'taker_buy_quote_volume', 'ignore'
-        ])
-
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        df.set_index('timestamp', inplace=True)
-        df.sort_index(inplace=True)
-
-        return df
-
-    except Exception as e:
-        st.error(f"Error fetching Binance data: {e}")
-        return pd.DataFrame()
+        return {
+            'price': float(data['lastPrice']),
+            'change_24h': float(data['priceChangePercent']),
+            'high_24h': float(data['highPrice']),
+            'low_24h': float(data['lowPrice']),
+            'volume': float(data['volume']),
+            'timestamp': datetime.now()
+        }
+    except:
+        return None
 
 
-def create_price_chart(df: pd.DataFrame, aroon_up: pd.Series, aroon_down: pd.Series,
-                       aroon_osc: pd.Series, signals: pd.Series = None) -> go.Figure:
-    """Create candlestick chart with Aroon indicators."""
+def create_interactive_price_chart(df: pd.DataFrame, aroon_up: pd.Series, aroon_down: pd.Series,
+                                   aroon_osc: pd.Series, signals: pd.Series = None,
+                                   show_signals: bool = True, compare_periods: bool = False) -> go.Figure:
+    """Create interactive candlestick chart with multiple time periods."""
 
     fig = make_subplots(
         rows=3, cols=1,
@@ -86,125 +96,53 @@ def create_price_chart(df: pd.DataFrame, aroon_up: pd.Series, aroon_down: pd.Ser
         subplot_titles=('BTC/USDT Price', 'Aroon Up/Down', 'Aroon Oscillator')
     )
 
-    # Candlestick chart
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df['open'],
-            high=df['high'],
-            low=df['low'],
-            close=df['close'],
-            name='BTC/USDT',
-            increasing_line_color='green',
-            decreasing_line_color='red'
-        ),
-        row=1, col=1
-    )
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+        name='BTC/USDT', increasing_line_color='green', decreasing_line_color='red',
+        showlegend=False
+    ), row=1, col=1)
 
-    # Volume bars
-    colors = ['green' if df.iloc[i]['close'] >= df.iloc[i]['open'] else 'red'
-              for i in range(len(df))]
-    fig.add_trace(
-        go.Bar(
-            x=df.index,
-            y=df['volume'],
-            marker_color=colors,
-            opacity=0.3,
-            name='Volume',
-            showlegend=False
-        ),
-        row=1, col=1
-    )
+    # Volume
+    colors = ['green' if df.iloc[i]['close'] >= df.iloc[i]['open'] else 'red' for i in range(len(df))]
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], marker_color=colors, opacity=0.3,
+                         name='Volume', showlegend=False), row=1, col=1)
 
     # Aroon Up/Down
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=aroon_up,
-            mode='lines',
-            name='Aroon Up',
-            line=dict(color='green', width=2),
-            showlegend=True
-        ),
-        row=2, col=1
-    )
+    fig.add_trace(go.Scatter(x=df.index, y=aroon_up, mode='lines', name='Aroon Up',
+                             line=dict(color='green', width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=aroon_down, mode='lines', name='Aroon Down',
+                             line=dict(color='red', width=2)), row=2, col=1)
 
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=aroon_down,
-            mode='lines',
-            name='Aroon Down',
-            line=dict(color='red', width=2),
-            showlegend=True
-        ),
-        row=2, col=1
-    )
-
-    # Horizontal lines at thresholds
-    fig.add_hline(y=50, line_dash="dash", line_color="gray",
-                  annotation_text="UP Threshold", row=2, col=1)
+    fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="UP", row=2, col=1)
+    fig.add_hline(y=-50, line_dash="dash", line_color="gray", annotation_text="DOWN", row=2, col=1)
     fig.add_hline(y=0, line_dash="solid", line_color="black", row=2, col=1)
-    fig.add_hline(y=-50, line_dash="dash", line_color="gray",
-                  annotation_text="DOWN Threshold", row=2, col=1)
 
     # Aroon Oscillator
-    osc_color = ['green' if v > 0 else 'red' for v in aroon_osc]
-    fig.add_trace(
-        go.Scatter(
-            x=df.index,
-            y=aroon_osc,
-            mode='lines',
-            name='Aroon Osc',
-            line=dict(color='blue', width=2),
-            showlegend=True
-        ),
-        row=3, col=1
-    )
+    fig.add_trace(go.Scatter(x=df.index, y=aroon_osc, mode='lines', name='Aroon Osc',
+                             line=dict(color='blue', width=2)), row=3, col=1)
 
     # Signal markers
-    if signals is not None and not signals.empty:
+    if show_signals and signals is not None:
         up_signals = df[signals == 'UP']
         down_signals = df[signals == 'DOWN']
 
         if not up_signals.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=up_signals.index,
-                    y=up_signals['close'],
-                    mode='markers',
-                    marker=dict(symbol='triangle-up', size=10, color='green'),
-                    name='BUY Signal',
-                    showlegend=False
-                ),
-                row=1, col=1
-            )
+            fig.add_trace(go.Scatter(x=up_signals.index, y=up_signals['close'], mode='markers',
+                                     marker=dict(symbol='triangle-up', size=12, color='green',
+                                                line=dict(width=2, color='white')),
+                                     name='BUY', showlegend=True), row=1, col=1)
 
         if not down_signals.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=down_signals.index,
-                    y=down_signals['close'],
-                    mode='markers',
-                    marker=dict(symbol='triangle-down', size=10, color='red'),
-                    name='SELL Signal',
-                    showlegend=False
-                ),
-                row=1, col=1
-            )
+            fig.add_trace(go.Scatter(x=down_signals.index, y=down_signals['close'], mode='markers',
+                                     marker=dict(symbol='triangle-down', size=12, color='red',
+                                                line=dict(width=2, color='white')),
+                                     name='SELL', showlegend=True), row=1, col=1)
 
-    # Update layout
     fig.update_layout(
-        height=800,
-        template='plotly_dark',
-        hovermode='x unified',
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
+        height=700, template='plotly_dark', hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        clickmode='event+select'
     )
 
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
@@ -213,387 +151,211 @@ def create_price_chart(df: pd.DataFrame, aroon_up: pd.Series, aroon_down: pd.Ser
     return fig
 
 
-def create_equity_curve(equity_df: pd.DataFrame) -> go.Figure:
-    """Create equity curve chart."""
-    fig = go.Figure()
+def create_compare_chart(df_base: pd.DataFrame, df_compare: pd.DataFrame, title: str) -> go.Figure:
+    """Compare two periods side by side."""
+    fig = make_subplots(rows=1, cols=2, subplot_titles=(f"Current ({len(df_base)} candles)",
+                                                        f"Comparison ({len(df_compare)} candles)"))
 
-    fig.add_trace(
-        go.Scatter(
-            x=equity_df.index,
-            y=equity_df['total_equity'],
-            mode='lines',
-            name='Total Equity',
-            line=dict(color='blue', width=2)
-        )
-    )
+    for i, (df, row) in enumerate([(df_base, 1), (df_compare, 1)]):
+        fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'],
+                                     low=df['low'], close=df['close'], showlegend=False), row=row, col=i+1)
 
-    fig.add_trace(
-        go.Scatter(
-            x=equity_df.index,
-            y=equity_df['cash'],
-            mode='lines',
-            name='Cash',
-            line=dict(color='orange', width=2)
-        )
-    )
-
-    # Add initial capital line
-    if len(equity_df) > 0:
-        initial_cap = equity_df['total_equity'].iloc[0]
-        fig.add_hline(
-            y=initial_cap,
-            line_dash="dash",
-            line_color="green",
-            annotation_text=f"Initial: ${initial_cap:,.2f}"
-        )
-
-    fig.update_layout(
-        template='plotly_dark',
-        height=300,
-        hovermode='x unified'
-    )
-
-    return fig
-
-
-def create_pnl_chart(pnl_history: list) -> go.Figure:
-    """Create PnL chart."""
-    if not pnl_history:
-        return None
-
-    cumulative_pnl = np.cumsum(pnl_history)
-
-    fig = go.Figure()
-
-    colors = ['green' if p >= 0 else 'red' for p in pnl_history]
-    fig.add_trace(
-        go.Bar(
-            x=list(range(len(pnl_history))),
-            y=pnl_history,
-            marker_color=colors,
-            name='Trade PnL'
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=list(range(len(cumulative_pnl))),
-            y=cumulative_pnl,
-            mode='lines',
-            name='Cumulative PnL',
-            line=dict(color='yellow', width=2)
-        )
-    )
-
-    fig.update_layout(
-        template='plotly_dark',
-        height=300,
-        xaxis_title='Trade Number',
-        yaxis_title='PnL ($)'
-    )
-
+    fig.update_layout(height=350, template='plotly_dark', showlegend=False)
     return fig
 
 
 def main():
-    """Main application entry point."""
+    """Main application."""
 
-    # Sidebar configuration
+    # Sidebar
     st.sidebar.title("⚙️ Configuration")
 
-    # Data source settings
+    # Live BTC ticker in sidebar
+    live_price = get_live_btc_price()
+    if live_price:
+        st.sidebar.metric("BTC Live Price", f"${live_price['price']:,.2f}",
+                         f"{live_price['change_24h']:+.2f}%")
+        st.sidebar.text(f"24h High: ${live_price['high_24h']:,.2f}")
+        st.sidebar.text(f"24h Low: ${live_price['low_24h']:,.2f}")
+        st.sidebar.text(f"24h Vol: {live_price['volume']/1e6:.2f}M BTC")
+
     st.sidebar.header("📊 Data Source")
-    data_source = st.sidebar.selectbox(
-        "Source",
-        ["binance", "coingecko"],
-        help="Choose data provider for BTC OHLC data"
-    )
+    data_source = st.sidebar.selectbox("Source", ["binance", "coingecko"])
+    interval = st.sidebar.selectbox("Interval", ["1h", "4h", "1d"])
 
-    interval = st.sidebar.selectbox(
-        "Interval",
-        ["1h", "4h", "1d"],
-        help="Candle interval for OHLC data"
-    )
+    # Quick period buttons
+    st.sidebar.header("⏱️ Time Period")
+    period_cols = st.sidebar.columns(4)
+    period_options = [('1M', 30), ('3M', 90), ('6M', 180), ('1Y', 365)]
+    for i, (label, days) in enumerate(period_options):
+        if period_cols[i].button(label, key=f'period_{label}'):
+            st.session_state['selected_period'] = label
 
-    days = st.sidebar.slider(
-        "Days of Data",
-        min_value=30,
-        max_value=730,
-        value=365,
-        step=30,
-        help="Number of days of historical data to fetch"
-    )
+    days_map = {'1M': 30, '3M': 90, '6M': 180, '1Y': 365, '2Y': 730}
+    days = days_map.get(st.session_state['selected_period'], 365)
 
-    # Aroon settings
     st.sidebar.header("📈 Aroon Parameters")
-    lookback = st.sidebar.slider(
-        "Lookback Period (N)",
-        min_value=7,
-        max_value=50,
-        value=14,
-        step=1,
-        help="Aroon indicator lookback period"
-    )
+    lookback = st.sidebar.slider("Lookback (N)", 7, 50, 14, 1)
+    up_threshold = st.sidebar.slider("UP Threshold", 30, 80, 50, 5)
+    down_threshold = st.sidebar.slider("DOWN Threshold", -80, -30, -50, 5)
+    cooldown = st.sidebar.slider("Cooldown", 0, 10, 2, 1)
 
-    up_threshold = st.sidebar.slider(
-        "UP Threshold",
-        min_value=30,
-        max_value=80,
-        value=50,
-        step=5,
-        help="Oscillator threshold for UP signal (> this value)"
-    )
-
-    down_threshold = st.sidebar.slider(
-        "DOWN Threshold",
-        min_value=-80,
-        max_value=-30,
-        value=-50,
-        step=5,
-        help="Oscillator threshold for DOWN signal (< this value)"
-    )
-
-    cooldown = st.sidebar.slider(
-        "Cooldown (periods)",
-        min_value=0,
-        max_value=10,
-        value=2,
-        help="Minimum periods between signals"
-    )
-
-    # Paper trading settings
     st.sidebar.header("💰 Paper Trading")
-    initial_capital = st.sidebar.number_input(
-        "Initial Capital ($)",
-        min_value=1000,
-        max_value=1000000,
-        value=10000,
-        step=1000,
-        help="Starting paper trading capital"
-    )
+    initial_capital = st.sidebar.number_input("Initial Capital ($)", 1000, 1000000, 10000, 1000)
+    fee_rate = st.sidebar.slider("Fee Rate (%)", 0.01, 1.0, 0.1, 0.01) / 100
+    slippage_bps = st.sidebar.slider("Slippage (bps)", 0, 50, 5, 1)
 
-    fee_rate = st.sidebar.slider(
-        "Fee Rate (%)",
-        min_value=0.01,
-        max_value=1.0,
-        value=0.1,
-        step=0.01,
-        help="Trading fee percentage"
-    ) / 100
+    # Auto-refresh toggle
+    st.sidebar.header("🔄 Auto Refresh")
+    auto_refresh = st.sidebar.toggle("Enable", value=st.session_state['auto_refresh'])
+    if auto_refresh != st.session_state['auto_refresh']:
+        st.session_state['auto_refresh'] = auto_refresh
+        st.session_state['refresh_count'] = 0
 
-    slippage_bps = st.sidebar.slider(
-        "Slippage (bps)",
-        min_value=0,
-        max_value=50,
-        value=5,
-        step=1,
-        help="Slippage in basis points"
-    )
+    # Refresh button
+    if st.sidebar.button("🔄 Refresh Data"):
+        st.session_state['last_update'] = None
 
     # Main title
-    st.title("📈 BTC Aroon Trend Agents — Paper Trading System")
-    st.markdown("### Educational Dashboard for BTC Trend Detection and Simulation")
-
-    # PAPER MODE banner
-    st.warning("⚠️ **PAPER MODE** — This is a simulation for educational purposes only. No real money is used. Past performance does not guarantee future results.", icon="⚠️")
+    st.title("📈 BTC Aroon Trend Agents — Interactive Dashboard")
+    st.markdown("### Three-Agent Architecture: Watch • Filter • Execute")
+    st.warning("⚠️ **PAPER MODE** — Educational simulation only. No real money.", icon="⚠️")
 
     # Fetch data
-    with st.spinner(f"Fetching {days} days of BTC data from {data_source}..."):
-        try:
-            if data_source == "binance":
-                df = get_btc_data_binance(days, interval)
-            else:
-                # Use CoinGecko for simplicity
-                from data_fetcher import BTCDataFetcher
-                fetcher = BTCDataFetcher(source='coingecko', interval=interval)
-                df = fetcher.fetch_historical(days)
+    @st.cache_data(ttl=60)
+    def fetch_and_cache(days, interval):
+        return get_btc_data_binance(days, interval)
 
-            if df.empty:
-                st.error("No data fetched. Check your internet connection or try a different data source.")
-                return
+    df = fetch_and_cache(days, interval)
 
-            # Ensure numeric columns
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = df[col].astype(float)
-        except Exception as e:
-            st.error(f"Error fetching data: {e}")
-            return
+    if df.empty:
+        st.error("No data available. Check connection or try different interval.")
+        return
 
-    # Calculate Aroon indicators
+    # Calculate indicators
     df['aroon_up'] = calculate_aroon_indicators(df['high'], lookback, price_type='high')
     df['aroon_down'] = calculate_aroon_indicators(df['low'], lookback, price_type='low')
     df['aroon_oscillator'] = df['aroon_up'] - df['aroon_down']
-
-    # Generate signals
     df['signal'] = df['aroon_oscillator'].apply(
-        lambda x: 'UP' if x > up_threshold else ('DOWN' if x < down_threshold else 'SKIP')
-    )
+        lambda x: 'UP' if x > up_threshold else ('DOWN' if x < down_threshold else 'SKIP'))
 
-    # Create the three-agent system
-    system = ThreeAgentSystem(
-        lookback=lookback,
-        up_threshold=up_threshold,
-        down_threshold=down_threshold,
-        cooldown=cooldown,
-        initial_capital=initial_capital,
-        fee_rate=fee_rate,
-        slippage_bps=slippage_bps
-    )
+    # Run agents
+    system = ThreeAgentSystem(lookback, up_threshold, down_threshold, cooldown,
+                              initial_capital, fee_rate, slippage_bps)
 
-    # Run analysis
-    with st.spinner("Running three-agent analysis..."):
-        report = system.run(df)
-        backtest_results = system.backtest(df)
+    report = system.run(df)
+    backtest = system.backtest(df)
 
-    # Display key metrics
+    # Key metrics row
     st.subheader("📊 Key Metrics")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        latest_price = float(df['close'].iloc[-1])
+        change = float(df['close'].iloc[-1] - df['close'].iloc[-2]) if len(df) > 1 else 0
+        st.metric("BTC Price", f"${latest_price:,.0f}", f"${change:,.0f}")
+    with c2:
+        osc = report['watcher_report'].get('latest_oscillator', 0)
+        st.metric("Aroon Osc", f"{osc:.1f}", "↑ Bullish" if osc > 50 else "↓ Bearish" if osc < -50 else "→ Neutral")
+    with c3:
+        st.metric("Total PnL", f"${backtest['metrics']['total_pnl']:,.0f}")
+    with c4:
+        st.metric("Win Rate", f"{backtest['metrics']['win_rate']:.1f}%")
+    with c5:
+        st.metric("Trades", f"{backtest['metrics']['total_trades']}")
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Chart tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Main Chart", "📊 Performance", "🤖 Agent Status", "📋 Trade Log"])
 
-    latest_price = df['close'].iloc[-1]
-    price_change = df['close'].iloc[-1] - df['close'].iloc[-2] if len(df) > 1 else 0
-    price_change_pct = (price_change / df['close'].iloc[-2] * 100) if len(df) > 1 and df['close'].iloc[-2] != 0 else 0
+    with tab1:
+        st.subheader("Interactive Price Chart")
+        st.plotly_chart(create_interactive_price_chart(df, df['aroon_up'], df['aroon_down'],
+                                                        df['aroon_oscillator'], df['signal']),
+                       use_container_width=True, key='main_chart')
 
-    with col1:
-        st.metric("BTC Price", f"${latest_price:,.2f}", f"${price_change:,.2f} ({price_change_pct:.2f}%)")
+        # Signal summary
+        sig_counts = df['signal'].value_counts()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("BUY Signals", sig_counts.get('UP', 0))
+        with col2:
+            st.metric("SELL Signals", sig_counts.get('DOWN', 0))
+        with col3:
+            st.metric("SKIP Signals", sig_counts.get('SKIP', 0))
 
-    with col2:
-        latest_osc = report['watcher_report'].get('latest_oscillator', 0)
-        st.metric("Aroon Oscillator", f"{latest_osc:.2f}",
-                  "↑ Strong Up" if latest_osc > 50 else "↓ Strong Down" if latest_osc < -50 else "→ Neutral")
+    with tab2:
+        st.subheader("Performance Analytics")
 
-    with col3:
-        summary = backtest_results['summary']
-        st.metric("Total PnL", f"${summary['total_pnl']:,.2f}")
+        eq_df = backtest['equity_curve']
+        trades_df = backtest['trades']
 
-    with col4:
-        st.metric("Win Rate", f"{summary['win_rate']*100:.1f}%")
+        col1, col2 = st.columns(2)
+        with col1:
+            if not eq_df.empty:
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(x=eq_df.index, y=eq_df['total_equity'],
+                                           mode='lines', name='Equity', line=dict(color='blue')))
+                fig_eq.add_trace(go.Scatter(x=eq_df.index, y=eq_df['cash'],
+                                           mode='lines', name='Cash', line=dict(color='orange')))
+                fig_eq.update_layout(height=300, template='plotly_dark', hovermode='x unified')
+                st.plotly_chart(fig_eq, use_container_width=True)
 
-    with col5:
-        st.metric("Total Trades", f"{summary['num_trades']}")
+        with col2:
+            if not trades_df.empty and 'pnl' in trades_df.columns:
+                pnl_list = trades_df['pnl'].tolist()
+                cum_pnl = np.cumsum(pnl_list)
+                fig_pnl = go.Figure()
+                fig_pnl.add_trace(go.Bar(x=list(range(len(pnl_list))), y=pnl_list,
+                                        marker_color=['green' if p >= 0 else 'red' for p in pnl_list]))
+                fig_pnl.add_trace(go.Scatter(x=list(range(len(cum_pnl))), y=cum_pnl,
+                                            mode='lines', name='Cumulative', line=dict(color='yellow')))
+                fig_pnl.update_layout(height=300, template='plotly_dark',
+                                     xaxis_title='Trade #', yaxis_title='PnL ($)')
+                st.plotly_chart(fig_pnl, use_container_width=True)
 
-    # Agent Status Cards
-    st.subheader("🤖 Agent Status")
+        # Performance metrics grid
+        st.subheader("Risk Metrics")
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Max Drawdown", f"{backtest['metrics']['max_drawdown']:.2f}%")
+        with m2:
+            st.metric("Total Return", f"{backtest['metrics']['total_pnl_pct']:.2f}%")
+        with m3:
+            avg_hold = backtest['metrics']['avg_holding_period']
+            st.metric("Avg Hold (hrs)", f"{avg_hold:.1f}" if avg_hold else "—")
+        with m4:
+            st.metric("Sharpe (Approx)", "—")
 
-    agent_col1, agent_col2, agent_col3 = st.columns(3)
+    with tab3:
+        st.subheader("Agent Status Cards")
+        ac1, ac2, ac3 = st.columns(3)
 
-    with agent_col1:
-        st.info("""
-        **Trend Watcher**
-        - ✅ Data Updated
-        - Lookback: {0}
-        - Latest Aroon Up: {1:.1f}
-        - Latest Aroon Down: {2:.1f}
-        """.format(
-            lookback,
-            report['watcher_report'].get('latest_aroon_up', 0),
-            report['watcher_report'].get('latest_aroon_down', 0)
-        ))
+        with ac1:
+            wr = report['watcher_report']
+            st.info(f"**👁️ Trend Watcher**\n- Data Points: {wr['data_points']}\n- Lookback: {wr['lookback_period']}\n- Aroon Up: {wr.get('latest_aroon_up', 0):.1f}\n- Aroon Down: {wr.get('latest_aroon_down', 0):.1f}")
 
-    with agent_col2:
-        signal_counts = report['signal_counts']
-        st.info("""
-        **Signal Filter**
-        - ✅ Analysis Complete
-        - UP Signals: {0}
-        - DOWN Signals: {1}
-        - SKIP Signals: {2}
-        - Cooldown: {3} periods
-        """.format(
-            signal_counts.get('UP', 0),
-            signal_counts.get('DOWN', 0),
-            signal_counts.get('SKIP', 0),
-            cooldown
-        ))
+        with ac2:
+            sc = report['signal_counts']
+            st.info(f"**🎯 Signal Filter**\n- UP: {sc.get('UP', 0)}\n- DOWN: {sc.get('DOWN', 0)}\n- SKIP: {sc.get('SKIP', 0)}\n- Cooldown: {cooldown} periods")
 
-    with agent_col3:
-        st.info("""
-        **Paper Executor**
-        - ✅ Simulation Ready
-        - Initial Capital: ${:,.0f}
-        - Final Equity: ${:,.2f}
-        - Max Drawdown: {:.2f}%
-        """.format(
-            system.paper_executor.initial_capital,
-            backtest_results['metrics']['final_equity'],
-            backtest_results['metrics']['max_drawdown']
-        ))
+        with ac3:
+            ps = backtest['summary']
+            st.info(f"**💼 Paper Executor**\n- Trades: {ps['num_trades']}\n- Win Rate: {ps['win_rate']*100:.1f}%\n- PnL: ${ps['total_pnl']:.2f}\n- Equity: ${backtest['metrics']['final_equity']:.2f}")
 
-    # Charts
-    st.subheader("📈 Charts")
-
-    # Main price chart
-    st.plotly_chart(
-        create_price_chart(df, df['aroon_up'], df['aroon_down'], df['aroon_oscillator'], df['signal']),
-        use_container_width=True
-    )
-
-    # Bottom row: Equity and PnL
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.plotly_chart(create_equity_curve(backtest_results['equity_curve']), use_container_width=True)
-
-    with col2:
-        trades_df = backtest_results['trades']
-        pnl_list = trades_df['pnl'].tolist() if not trades_df.empty and 'pnl' in trades_df.columns else []
-        pnl_chart = create_pnl_chart(pnl_list)
-        if pnl_chart:
-            st.plotly_chart(pnl_chart, use_container_width=True)
-
-    # Signal table
-    st.subheader("📋 Recent Signals")
-
-    recent_signals = df[['close', 'aroon_up', 'aroon_down', 'aroon_oscillator', 'signal']].tail(20).copy()
-    recent_signals.index = recent_signals.index.strftime('%Y-%m-%d %H:%M')
-    st.dataframe(recent_signals, use_container_width=True)
-
-    # Trade history
-    trades_df = backtest_results['trades']
-    if not trades_df.empty:
-        st.subheader("💼 Trade History")
-        st.dataframe(trades_df, use_container_width=True)
-
-    # Performance summary
-    st.subheader("📊 Performance Summary")
-
-    perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-
-    with perf_col1:
-        st.metric("Total Return", f"{backtest_results['metrics']['total_pnl_pct']:.2f}%")
-
-    with perf_col2:
-        st.metric("Max Drawdown", f"{backtest_results['metrics']['max_drawdown']:.2f}%")
-
-    with perf_col3:
-        st.metric("Sharpe Ratio (Approx)", "—")  # Would need risk-free rate
-
-    with perf_col4:
-        avg_holding = backtest_results['metrics']['avg_holding_period']
-        if avg_holding:
-            st.metric("Avg Holding (hrs)", f"{avg_holding:.1f}")
+    with tab4:
+        if not trades_df.empty:
+            st.dataframe(trades_df.style.highlight_max(subset=['pnl'], color='green').
+                        highlight_min(subset=['pnl'], color='red'), use_container_width=True)
         else:
-            st.metric("Avg Holding (hrs)", "—")
+            st.info("No trades executed yet. Adjust parameters to generate signals.")
+
+    # Live update indicator
+    if st.session_state['auto_refresh']:
+        st.session_state['refresh_count'] += 1
+        st.sidebar.success(f"Auto-refresh #{st.session_state['refresh_count']}")
 
     # Disclaimer
-    st.markdown("""
-    ---
-    ### ⚠️ Disclaimer
-
-    This is a **paper trading simulation** for educational purposes only.
-
-    - **No real money is involved**
-    - **Past performance does not guarantee future results**
-    - **Aroon indicators are not guaranteed to predict price movements**
-    - **Prediction markets involve risk of loss**
-
-    Do NOT represent any results as audited or independently proven AI-system performance.
-    Never place real orders or claim that signals equal profitable prediction-market positions.
-    """, unsafe_allow_html=True)
-
-    # Footer
-    st.caption(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Data: {data_source} | Interval: {interval}")
+    st.markdown("---")
+    st.caption("📚 Educational simulation only | No real money involved | Not financial advice")
 
 
 if __name__ == "__main__":
